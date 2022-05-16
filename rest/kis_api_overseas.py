@@ -14,6 +14,7 @@ import pandas as pd
 
 from collections import namedtuple
 from datetime import datetime
+from decimal import *
 
 with open(r'./config/kisdev_vi.yaml', encoding='UTF-8') as f:
     _cfg = yaml.load(f, Loader=yaml.FullLoader)
@@ -116,22 +117,33 @@ def auth(svr='prod', product='01'):
 
     url = f'{_cfg[svr]}/oauth2/tokenP'
 
-    res = requests.post(url, data=json.dumps(p), headers=_getBaseHeader())
-    rescode = res.status_code
-    if rescode == 200:
-        my_token = _getResultObject(res.json()).access_token
-    else:
-        print('Get Authentification token fail!\nYou have to restart your app!!!')
-        return
+    global _last_auth_time
+    try:
+        with open("./config/token.json", "r") as f:
+            cfg_token = json.load(f)
+        my_token = cfg_token["my_token"]
+        _last_auth_time = datetime.fromtimestamp(float(cfg_token["_last_auth_time"]))
+        assert ((datetime.now() - _last_auth_time).seconds < 86400)
+    except:
+        res = requests.post(url, data=json.dumps(p), headers=_getBaseHeader())
+        rescode = res.status_code
+        if rescode == 200:
+            my_token = _getResultObject(res.json()).access_token
+        else:
+            print('Get Authentification token fail!\nYou have to restart your app!!!')
+            return
+        _last_auth_time = datetime.now()
+        with open("./config/token.json", "w") as f:
+            json.dump({
+                "my_token": my_token,
+                "_last_auth_time": _last_auth_time.timestamp(),
+            }, f)
 
     changeTREnv(f"Bearer {my_token}", svr, product)
 
     _base_headers["authorization"] = _TRENV.my_token
     _base_headers["appkey"] = _TRENV.my_app
     _base_headers["appsecret"] = _TRENV.my_sec
-
-    global _last_auth_time
-    _last_auth_time = datetime.now()
 
     if (_DEBUG):
         print(f'[{_last_auth_time}] => get AUTH Key completed!')
@@ -328,15 +340,16 @@ def get_acct_balance(rtCashFlag=False):
     output1 = t1.getBody().output1
     if t1.isOK() and output1:  # body 의 rt_cd 가 0 인 경우만 성공
         tdf = pd.DataFrame(output1)
-        tdf.set_index('ovrs_pdno', inplace=True)
         cf1 = ['cano', 'prdt_type_cd', 'ovrs_pdno', 'ovrs_item_name',
-               'ovrs_cblc_qty', 'ord_psbl_qty', 'NOW_PRIC2', 'ovrs_stck_evlu_amt',
+               'ovrs_cblc_qty', 'ord_psbl_qty', 'now_pric2', 'ovrs_stck_evlu_amt',
                'tr_crcy_cd', 'ovrs_excg_cd']
         cf2 = ['계좌번호', '상품유형코드', '종목코드', '종목명',
                '보유수량', '매도가능수량', '현재가', '평가금액',
                '통화코드', '거래소코드']
+        cf_numeric = ["ovrs_cblc_qty", "ord_psbl_qty", "now_pric2", "ovrs_stck_evlu_amt", ]
         tdf = tdf[cf1]
-        tdf[cf1[1:]] = tdf[cf1[1:]].apply(pd.to_numeric)
+        tdf[cf_numeric] = tdf[cf_numeric].apply(pd.to_numeric)
+        tdf.set_index('ovrs_pdno', inplace=True)
         ren_dict = dict(zip(cf1, cf2))
         return tdf.rename(columns=ren_dict)
     else:
@@ -358,16 +371,26 @@ def get_current_price(exchange, symbol):
     tr_id = "HHDFS00000300"
 
     params = {
-        # 'FID_COND_MRKT_DIV_CODE': _getStockDiv(stock_no),
-        # 'FID_INPUT_ISCD': stock_no
-        'excd': exchange,  # "NAS"
-        'symb': symbol  # "TSLA"
+        "AUTH": "",
+        "EXCD": exchange,
+        "SYMB": symbol,
     }
 
     t1 = _url_fetch(url, tr_id, params)
 
-    if t1.isOK():
-        return t1.getBody().output
+    output = t1.getBody().output
+    if t1.isOK() and output["rsym"] != '':
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "실시간조회종목코드": output["rsym"],
+            "소수점자리수": int(output["zdiv"]),
+            "전일종가": Decimal(output["base"]),
+            "전일거래량": int(output["pvol"]),
+            "현재가": Decimal(output["last"]),
+            "거래량": int(output["tvol"]),
+            "가능여부": output["ordy"],
+        }
     else:
         t1.printError()
         return dict()
@@ -415,6 +438,16 @@ def do_order(excg_code, stock_code, order_qty, order_price, prd_code="01", buy_f
                 tr_id = "JTTT1006U"
 
     '''
+    OVRS_EXCG_CD
+    NASD : 나스닥 
+    NYSE : 뉴욕 
+    AMEX : 아멕스 
+    SEHK : 홍콩 
+    SHAA : 중국상해 
+    SZAA : 중국심천 
+    TKSE : 일본
+    
+    
     ORD_DVSN
     [Header tr_id JTTT1002U (미국 매수 주문)] 
     00 : 지정가 
@@ -439,13 +472,16 @@ def do_order(excg_code, stock_code, order_qty, order_price, prd_code="01", buy_f
         'ACNT_PRDT_CD': prd_code,
         'OVRS_EXCG_CD': excg_code,
         'PDNO': stock_code,
-        'ORD_DVSN': order_type,
         'ORD_QTY': str(order_qty),
-        'ORD_UNPR': str(order_price),
+        'OVRS_ORD_UNPR': str(order_price),
         'CTAC_TLNO': '',
-        'SLL_TYPE': '00',
+        "MGCO_APTM_ODNO": "",
         'ORD_SVR_DVSN_CD': '0',
+        'ORD_DVSN': order_type,
     }
+    if not buy_flag:
+        params['SLL_TYPE'] = '00'
+
 
     t1 = _url_fetch(url, tr_id, params, postFlag=True, hashFlag=True)
 
@@ -461,7 +497,7 @@ def do_order(excg_code, stock_code, order_qty, order_price, prd_code="01", buy_f
 # Output: True, False
 
 def do_sell(excg_code, stock_code, order_qty, order_price, prd_code="01", order_type="00"):
-    t1 = do_order(stock_code, order_qty, order_price, buy_flag=False, order_type=order_type)
+    t1 = do_order(excg_code, stock_code, order_qty, order_price, buy_flag=False, order_type=order_type)
     return t1.isOK()
 
 
@@ -470,7 +506,7 @@ def do_sell(excg_code, stock_code, order_qty, order_price, prd_code="01", order_
 # Output: True, False
 
 def do_buy(excg_code, stock_code, order_qty, order_price, prd_code="01", order_type="00"):
-    t1 = do_order(stock_code, order_qty, order_price, buy_flag=True, order_type=order_type)
+    t1 = do_order(excg_code, stock_code, order_qty, order_price, buy_flag=True, order_type=order_type)
     return t1.isOK()
 
 
@@ -511,16 +547,18 @@ def get_orders(prd_code='01'):
     t1 = _url_fetch(url, tr_id, params)
     if t1.isOK() and t1.getBody().output:
         tdf = pd.DataFrame(t1.getBody().output)
-        tdf.set_index('orgn_odno', inplace=True)
-        cf1 = ['pdno', 'prdt_name', 'ord_qty', 'ft_ord_unpr3',
-               'ft_ccld_unpr3', 'ft_ccld_amt3', 'ord_tmd', 'ord_gno_brno',
-               'orgn_odno']
-        cf2 = ['종목코드', '종목명', '주문수량', '주문가격',
-               '체결가격', '체결금액', '시간', '주문점',
-               '원번호']
+        cf1 = ['pdno', 'prdt_name', 'ft_ord_qty', 'ft_ccld_qty', 'nccs_qty',
+               'ft_ord_unpr3', 'ft_ccld_unpr3', 'ft_ccld_amt3', 'ord_tmd', 'ord_gno_brno',
+               'odno', 'orgn_odno', "tr_mket_name", "ovrs_excg_cd",
+               "sll_buy_dvsn_cd", "sll_buy_dvsn_cd_name",
+        ]
+        cf2 = ['종목코드', '종목명', '주문수량', '체결수량', '미체결수량',
+               '주문가격', '체결가격', '체결금액', '시간', '주문점',
+               '주문번호', '원번호', "거래시장명", "거래소코드",
+               '매수매도코드', '매수매도구분']
         tdf = tdf[cf1]
+        # tdf.set_index('orgn_odno', inplace=True)
         ren_dict = dict(zip(cf1, cf2))
-
         return tdf.rename(columns=ren_dict)
 
     else:
@@ -533,7 +571,7 @@ def get_orders(prd_code='01'):
 #       주문점(통상 06010), 주문수량, 주문가격, 상품코드(01), 주문유형(00), 정정구분(취소-02, 정정-01)
 # Output: APIResp object
 
-def _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, order_dv, cncl_dv, qty_all_yn):
+def _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv, ):
     url = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
 
     if getTREnv().svc == "prod":
@@ -559,7 +597,6 @@ def _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, 
         "ACNT_PRDT_CD": prd_code,
         "OVRS_EXCG_CD": excg_code,
         "PDNO": symbol,
-        # "KRX_FWDG_ORD_ORGNO": order_branch,
         "ORGN_ODNO": order_no,
         "ORD_DVSN": order_dv,
         "RVSE_CNCL_DVSN_CD": cncl_dv,  # 취소(02) 01 : 정정
@@ -568,7 +605,6 @@ def _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, 
         "CTAC_TLNO": "",
         "MGCO_APTM_ODNO": "",
         "ORD_SVR_DVSN_CD": "0"
-        # "QTY_ALL_ORD_YN": qty_all_yn
     }
 
     t1 = _url_fetch(url, tr_id, params=params, postFlag=True)
@@ -582,16 +618,13 @@ def _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, 
 
 # 특정 주문 취소
 #
-def do_cancel(order_no, order_qty, order_price="01", order_branch='06010', prd_code='01', order_dv='00', cncl_dv='02',
-              qty_all_yn="Y"):
-    return _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, order_dv, cncl_dv, qty_all_yn)
-
+def do_cancel(excg_code, order_no, order_qty, symbol, order_price='', prd_code='01', order_dv='00', cncl_dv='02',):
+    return _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv)
 
 # 특정 주문 정정
 #
-def do_revise(order_no, order_qty, order_price, order_branch='06010', prd_code='01', order_dv='00', cncl_dv='01',
-              qty_all_yn="Y"):
-    return _do_cancel_revise(order_no, order_branch, order_qty, order_price, prd_code, order_dv, cncl_dv, qty_all_yn)
+def do_revise(excg_code, order_no, order_qty, symbol, order_price, prd_code='01', order_dv='00', cncl_dv='01',):
+    return _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv)
 
 
 # 모든 주문 취소
