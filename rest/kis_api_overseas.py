@@ -123,7 +123,7 @@ def auth(svr='prod', product='01'):
             cfg_token = json.load(f)
         my_token = cfg_token["my_token"]
         _last_auth_time = datetime.fromtimestamp(float(cfg_token["_last_auth_time"]))
-        assert ((datetime.now() - _last_auth_time).seconds < 86400)
+        assert ((datetime.now() - _last_auth_time).seconds < 86400 - 30000)
     except:
         res = requests.post(url, data=json.dumps(p), headers=_getBaseHeader())
         rescode = res.status_code
@@ -482,7 +482,6 @@ def do_order(excg_code, stock_code, order_qty, order_price, prd_code="01", buy_f
     if not buy_flag:
         params['SLL_TYPE'] = '00'
 
-
     t1 = _url_fetch(url, tr_id, params, postFlag=True, hashFlag=True)
 
     if t1.isOK():
@@ -551,14 +550,14 @@ def get_orders(prd_code='01'):
                'ft_ord_unpr3', 'ft_ccld_unpr3', 'ft_ccld_amt3', 'ord_tmd', 'ord_gno_brno',
                'odno', 'orgn_odno', "tr_mket_name", "ovrs_excg_cd",
                "sll_buy_dvsn_cd", "sll_buy_dvsn_cd_name",
-        ]
+               ]
         cf2 = ['종목코드', '종목명', '주문수량', '체결수량', '미체결수량',
                '주문가격', '체결가격', '체결금액', '시간', '주문점',
                '주문번호', '원번호', "거래시장명", "거래소코드",
                '매수매도코드', '매수매도구분']
         tdf = tdf[cf1]
         # tdf.set_index('orgn_odno', inplace=True)
-        ren_dict = dict(zip(cf1, cf2))
+        ren_dict = dict(zip(cf1, cf2))  # FIXME : 미체결수량 등 int 처리해줘야함
         return tdf.rename(columns=ren_dict)
 
     else:
@@ -574,7 +573,7 @@ def get_orders(prd_code='01'):
 def _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv, ):
     url = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
 
-    if getTREnv().svc == "prod":
+    if getTREnv().svr == "prod":
         if getTREnv().market == "NAS":
             tr_id = "JTTT1004U"
 
@@ -618,12 +617,13 @@ def _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_c
 
 # 특정 주문 취소
 #
-def do_cancel(excg_code, order_no, order_qty, symbol, order_price='', prd_code='01', order_dv='00', cncl_dv='02',):
+def do_cancel(excg_code, order_no, order_qty, symbol, order_price='', prd_code='01', order_dv='00', cncl_dv='02', ):
     return _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv)
+
 
 # 특정 주문 정정
 #
-def do_revise(excg_code, order_no, order_qty, symbol, order_price, prd_code='01', order_dv='00', cncl_dv='01',):
+def do_revise(excg_code, order_no, order_qty, symbol, order_price, prd_code='01', order_dv='00', cncl_dv='01', ):
     return _do_cancel_revise(excg_code, order_no, symbol, order_qty, order_price, prd_code, order_dv, cncl_dv)
 
 
@@ -716,32 +716,33 @@ def get_my_complete(sdt, edt=None, prd_code='01', zipFlag=True):
         return pd.DataFrame()
 
 
-# 매수 가능(현금) 조회
-# Input: None
-# Output: 매수 가능 현금 액수
-def get_buyable_cash(stock_code='', qry_price=0, prd_code='01'):
-    raise NotImplementedError
-
-    url = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-    tr_id = "TTTC8908R"
+# 잔고 확인
+def get_buyable_cash(prd_code='01'):
+    url = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
+    tr_id = "CTRP6504R"
 
     params = {
         "CANO": getTREnv().my_acct,
         "ACNT_PRDT_CD": prd_code,
-        "PDNO": stock_code,
-        "ORD_UNPR": str(qry_price),
-        "ORD_DVSN": "02",
-        "CMA_EVLU_AMT_ICLD_YN": "Y",  # API 설명부분 수정 필요 (YN)
-        "OVRS_ICLD_YN": "N"
+        "WCRC_FRCR_DVSN_CD": "02",
+        "NATN_CD": "840", # 미국
+        "TR_MKET_CD": "01", # 나스닥
+        "INQR_DVSN_CD": "01" # 일반해외주식
     }
-
     t1 = _url_fetch(url, tr_id, params)
 
     if t1.isOK():
-        return int(t1.getBody().output['ord_psbl_cash'])
+        body = t1.getBody()
+        output = {}
+        for o in body.output2:
+            if o["crcy_cd"] == "USD":
+                output.update(o)
+        output.update(body.output3)
+        output["AUM"] = float(output["frcr_dncl_amt_2"])
+        return output
     else:
         t1.printError()
-        return 0
+        return {}
 
 
 # 시세 Function
