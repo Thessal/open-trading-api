@@ -123,7 +123,7 @@ def auth(svr='prod', product='01'):
             cfg_token = json.load(f)
         my_token = cfg_token["my_token"]
         _last_auth_time = datetime.fromtimestamp(float(cfg_token["_last_auth_time"]))
-        assert ((datetime.now() - _last_auth_time).seconds < 86400 - 30000)
+        assert ((datetime.now() - _last_auth_time).total_seconds() < 86400 - 30000)
     except:
         res = requests.post(url, data=json.dumps(p), headers=_getBaseHeader())
         rescode = res.status_code

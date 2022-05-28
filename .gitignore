@@ -4,4 +4,7 @@ config
 config/apikey.yaml
 config/kisdev_vi.yaml
 config/*.yaml
+dmgr
+dmgr/*
+dmgr/*.py
 *.yaml
