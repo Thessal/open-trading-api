@@ -246,7 +246,7 @@ class APIResp:
 
 ########### API call wrapping
 
-def _url_fetch(api_url, ptr_id, params, appendHeaders=None, postFlag=False, hashFlag=True):
+def _url_fetch(api_url, ptr_id, params, tr_cont=None, appendHeaders=None, postFlag=False, hashFlag=True):
     url = f"{getTREnv().my_url}{api_url}"
 
     headers = _getBaseHeader()
@@ -258,6 +258,8 @@ def _url_fetch(api_url, ptr_id, params, appendHeaders=None, postFlag=False, hash
             tr_id = 'V' + ptr_id[1:]
 
     headers["tr_id"] = tr_id
+    if tr_cont is not None:
+        headers["tr_cont"] = tr_cont
     headers["custtype"] = "P"
 
     if appendHeaders is not None:
@@ -651,11 +653,9 @@ def do_cancel_all():
 # output: DataFrame
 
 def get_my_complete(sdt, edt=None, prd_code='01', zipFlag=True):
-    raise NotImplementedError
-
     url = "/uapi/overseas-stock/v1/trading/inquire-ccnl"
 
-    if getTREnv().svc == "prod":
+    if getTREnv().svr == "prod":
         if getTREnv().market == "NAS":
             tr_id = "JTTT3001R"
 
@@ -698,22 +698,50 @@ def get_my_complete(sdt, edt=None, prd_code='01', zipFlag=True):
         "CTX_AREA_FK200": "",
 
     }
+    tr_cont = None
 
-    t1 = _url_fetch(url, tr_id, params)
-
-    # output1 과 output2 로 나뉘어서 결과가 옴. 지금은 output1만 DF 로 변환
-    if t1.isOK():
-        tdf = pd.DataFrame(t1.getBody().output1)
-        tdf.set_index('odno', inplace=True)
-        if (zipFlag):
-            return tdf[
-                ['ord_dt', 'orgn_odno', 'sll_buy_dvsn_cd_name', 'pdno', 'ord_qty', 'ord_unpr', 'avg_prvs', 'cncl_yn',
-                 'tot_ccld_amt', 'rmn_qty']]
+    dfs = []
+    for _ in range(1000):
+        t1 = _url_fetch(url, tr_id, params, tr_cont=tr_cont)
+        # output1 과 output2 로 나뉘어서 결과가 옴. 지금은 output1만 DF 로 변환
+        if t1.isOK():
+            tdf = pd.DataFrame(t1.getBody().output)
+            tdf.set_index('odno', inplace=True)
+            if (zipFlag):
+                dfs.append(tdf[
+                               ['ord_dt', 'ord_tmd', 'orgn_odno', 'sll_buy_dvsn_cd_name', 'pdno',
+                                'ft_ord_qty', 'ft_ord_unpr3', 'ft_ccld_qty', 'ft_ccld_unpr3', 'ft_ccld_amt3',
+                                'nccs_qty',
+                                'prcs_stat_name', 'ovrs_excg_cd']])
+            else:
+                dfs.append(tdf)
+            if t1.getHeader().tr_cont in ['F', 'M']:
+                assert (
+                        (params["CTX_AREA_NK200"] != t1.getBody().ctx_area_nk200) or
+                        (params["CTX_AREA_FK200"] != t1.getBody().ctx_area_fk200))
+                params["CTX_AREA_NK200"] = t1.getBody().ctx_area_nk200
+                params["CTX_AREA_FK200"] = t1.getBody().ctx_area_fk200
+                tr_cont = "N"
+            elif t1.getHeader().tr_cont in ['D', 'E']:
+                break
+            else:
+                raise ValueError("get_my_complete chain fail")
+                break
         else:
-            return tdf
-    else:
-        t1.printError()
-        return pd.DataFrame()
+            t1.printError()
+            dfs.append(pd.DataFrame())
+    df = pd.concat(dfs)
+    df = df.reset_index()
+    assert df["ovrs_excg_cd"].isin(["NASD"]).all()  # FIXME
+    df["Instrument"] = df["pdno"] + df["ovrs_excg_cd"].map({"NASD": ".OQ"})
+    df["datadate"] = datetime.utcnow()
+    df = df.set_index(["datadate", "Instrument", "odno"]).stack()  # Requires unique key to be reversibly stack
+    df.index = df.index.rename("field", level=3)
+    df = df.rename("value").reset_index().set_index(["datadate", "field", "Instrument"]).sort_index()
+    return df
+    # NOTE
+    # Example :
+    # df.loc[slice(None),slice(None),"AAPL.OQ"].reset_index().set_index(["odno","field"])["value"].unstack()
 
 
 # 잔고 확인
@@ -725,9 +753,9 @@ def get_buyable_cash(prd_code='01'):
         "CANO": getTREnv().my_acct,
         "ACNT_PRDT_CD": prd_code,
         "WCRC_FRCR_DVSN_CD": "02",
-        "NATN_CD": "840", # 미국
-        "TR_MKET_CD": "01", # 나스닥
-        "INQR_DVSN_CD": "01" # 일반해외주식
+        "NATN_CD": "840",  # 미국
+        "TR_MKET_CD": "01",  # 나스닥
+        "INQR_DVSN_CD": "01"  # 일반해외주식
     }
     t1 = _url_fetch(url, tr_id, params)
 

@@ -33,7 +33,7 @@ class Clock:
         self.calendar = {
             "nasdaq": xcals.get_calendar("NASDAQ", side="left")
         }
-        assert (xcals.__version__ == '3.6.2')
+        assert (xcals.__version__ == '3.6.3')
 
     def tick(self):
         if self.running:
